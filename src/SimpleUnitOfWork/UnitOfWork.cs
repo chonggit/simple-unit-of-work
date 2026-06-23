@@ -32,6 +32,15 @@ namespace SimpleUnitOfWork
         public int CommandTimeout { get; set; } = 30;
 
         /// <summary>
+        /// 检查当前实例是否已释放，若已释放则抛出 <see cref="ObjectDisposedException"/>。
+        /// </summary>
+        private void EnsureNotDisposed()
+        {
+            if (_disposedValue)
+                throw new ObjectDisposedException(nameof(UnitOfWork));
+        }
+
+        /// <summary>
         /// 当前活动事务。访问之前会确保事务已创建。
         /// </summary>
         public IDbTransaction Transaction
@@ -48,6 +57,7 @@ namespace SimpleUnitOfWork
         /// </summary>
         public UnitOfWork(IDbConnection connection)
         {
+            ArgumentNullException.ThrowIfNull(connection);
             _connection = connection;
         }
 
