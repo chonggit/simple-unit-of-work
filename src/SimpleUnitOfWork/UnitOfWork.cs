@@ -84,6 +84,22 @@ namespace SimpleUnitOfWork
         }
 
         /// <summary>
+        /// 确保连接处于 Open 状态。处理 ConnectionState.Broken 等异常状态。
+        /// </summary>
+        private void EnsureConnectionOpen()
+        {
+            if (_connection.State == ConnectionState.Open)
+                return;
+
+            if (_connection.State == ConnectionState.Broken)
+            {
+                try { _connection.Close(); }
+                catch { /* Close() 在部分 ADO.NET 实现中对 Broken 连接可能抛出。吞掉后尝试 Open() */ }
+            }
+            _connection.Open();
+        }
+
+        /// <summary>
         /// 当前活动事务。访问之前会确保事务已创建。
         /// </summary>
         public IDbTransaction Transaction
@@ -110,14 +126,16 @@ namespace SimpleUnitOfWork
         /// </summary>
         public void Demand(IsolationLevel level)
         {
-            EnsureNotDisposed();
-            if (_completed)
-                throw new InvalidOperationException("This UnitOfWork has already been committed or rolled back.");
-            if (_transaction == null)
+            lock (_lock)
             {
-                if (_connection.State != ConnectionState.Open)
-                    _connection.Open();
-                _transaction = _connection.BeginTransaction(level);
+                EnsureNotDisposed();
+                if (_completed)
+                    throw new InvalidOperationException("This UnitOfWork has already been committed or rolled back.");
+                if (_transaction == null)
+                {
+                    EnsureConnectionOpen();
+                    _transaction = _connection.BeginTransaction(level);
+                }
             }
         }
 
@@ -130,28 +148,46 @@ namespace SimpleUnitOfWork
         }
 
         /// <summary>
+        /// 执行事务提交/回滚操作的公共骨架。处理 _completed 守卫、异常处理、资源清理。
+        /// 调用前调用者应已持有 _lock。
+        /// ⚠ _handleException 在实例锁（_lock）内执行，handler 应避免阻塞或调用此实例的方法。
+        /// </summary>
+        private void CompleteTransaction(Action<IDbTransaction> action)
+        {
+            EnsureNotDisposed();
+            if (_completed)
+                throw new InvalidOperationException("This UnitOfWork has already been committed or rolled back.");
+
+            if (_transaction == null)
+                throw new InvalidOperationException("There is no active transaction to complete. Call Demand() first.");
+
+            try
+            {
+                action(_transaction);
+                _completed = true;        // 仅在成功后设置，允许失败后重试
+            }
+            catch (Exception ex)
+            {
+                try { _handleException?.Invoke(ex); }
+                catch { /* handler 异常不压制原始异常 */ }
+                throw;                     // 保留原始异常堆栈
+            }
+            finally
+            {
+                try { _transaction.Dispose(); }
+                catch { /* Dispose 失败不能掩饰 commit/rollback 的异常 */ }
+                _transaction = null;
+            }
+        }
+
+        /// <summary>
         /// 提交当前事务并释放事务资源。
         /// </summary>
         public void Commit()
         {
-            EnsureNotDisposed();
-            if (_transaction != null)
+            lock (_lock)
             {
-                try
-                {
-                    _transaction.Commit();
-                }
-                catch (Exception ex)
-                {
-                    _handleException?.Invoke(ex);
-                    throw;
-                }
-                finally
-                {
-                    _transaction.Dispose();
-                    _transaction = null;
-                    _completed = true;
-                }
+                CompleteTransaction(t => t.Commit());
             }
         }
 
@@ -160,24 +196,9 @@ namespace SimpleUnitOfWork
         /// </summary>
         public void Rollback()
         {
-            EnsureNotDisposed();
-            if (_transaction != null)
+            lock (_lock)
             {
-                try
-                {
-                    _transaction.Rollback();
-                }
-                catch (Exception ex)
-                {
-                    _handleException?.Invoke(ex);
-                    throw;
-                }
-                finally
-                {
-                    _transaction.Dispose();
-                    _transaction = null;
-                    _completed = true;
-                }
+                CompleteTransaction(t => t.Rollback());
             }
         }
 
