@@ -15,6 +15,41 @@ namespace SimpleUnitOfWork
 
         private IDbConnection _connection;
 
+        private static Func<IDbConnection>? _connectionFactory;
+
+        private static Action<Exception>? _handleException;
+
+        /// <summary>
+        /// 设置全局异常处理器，用于处理工作单元操作中发生的异常。此方法应在创建任何工作单元实例之前调用。
+        /// </summary>
+        /// <param name="handler"> 异常处理器 </param>
+        public static void SetHandleException(Action<Exception> handler)
+        {
+            _handleException = handler;
+        }
+
+        /// <summary>
+        /// 设置用于创建数据库连接的工厂方法。此方法应在创建任何工作单元实例之前调用。
+        /// </summary>
+        /// <param name="connectionFactory"> 数据库连接工厂方法 </param>
+        public static void SetConnectionFactory(Func<IDbConnection> connectionFactory)
+        {
+            ArgumentNullException.ThrowIfNull(connectionFactory);
+            _connectionFactory = connectionFactory;
+        }
+
+        /// <summary>
+        /// 创建一个新的工作单元实例，使用预先设置的连接工厂生成数据库连接。
+        /// </summary>
+        /// <exception cref="InvalidOperationException"></exception>
+        public static IUnitOfWork Create()
+        {
+            if (_connectionFactory == null)
+                throw new InvalidOperationException("Connection factory is not set. Call SetConnectionFactory first.");
+            var connection = _connectionFactory();
+            return new UnitOfWork(connection);
+        }
+
         /// <summary>
         /// 当前数据库连接，首次访问时确保已初始化事务或直接返回连接。
         /// </summary>
@@ -100,6 +135,11 @@ namespace SimpleUnitOfWork
                 {
                     _transaction.Commit();
                 }
+                catch (Exception ex)
+                {
+                    _handleException?.Invoke(ex);
+                    throw;
+                }
                 finally
                 {
                     _transaction.Dispose();
@@ -120,6 +160,11 @@ namespace SimpleUnitOfWork
                 try
                 {
                     _transaction.Rollback();
+                }
+                catch (Exception ex)
+                {
+                    _handleException?.Invoke(ex);
+                    throw;
                 }
                 finally
                 {
@@ -143,9 +188,9 @@ namespace SimpleUnitOfWork
                     {
                         Rollback();
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        // Dispose 绝不能抛异常 — 吞掉 Rollback 的失败
+                        _handleException?.Invoke(ex);
                     }
 
                     _connection?.Dispose();
