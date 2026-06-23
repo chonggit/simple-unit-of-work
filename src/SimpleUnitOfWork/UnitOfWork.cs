@@ -66,9 +66,12 @@ namespace SimpleUnitOfWork
         /// </summary>
         public void Demand(IsolationLevel level)
         {
+            EnsureNotDisposed();
             if (_transaction == null)
             {
-                _transaction = Connection.BeginTransaction(level);
+                if (_connection.State != ConnectionState.Open)
+                    _connection.Open();
+                _transaction = _connection.BeginTransaction(level);
             }
         }
 
