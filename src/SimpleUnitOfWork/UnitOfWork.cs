@@ -17,19 +17,7 @@ namespace SimpleUnitOfWork
 
         private static volatile Func<IDbConnection>? _connectionFactory;
 
-        private static volatile Action<Exception>? _handleException;
-
         private readonly object _lock = new();
-
-        /// <summary>
-        /// 设置全局异常处理器，用于处理工作单元操作中发生的异常。此方法应在创建任何工作单元实例之前调用。
-        /// </summary>
-        /// <param name="handler"> 异常处理器 </param>
-        public static void SetHandleException(Action<Exception> handler)
-        {
-            ArgumentNullException.ThrowIfNull(handler);
-            _handleException = handler;
-        }
 
         /// <summary>
         /// 设置用于创建数据库连接的工厂方法。此方法应在创建任何工作单元实例之前调用。
@@ -169,12 +157,6 @@ namespace SimpleUnitOfWork
             {
                 action(_transaction);
                 _completed = true;        // 仅在成功后设置，允许失败后重试
-            }
-            catch (Exception ex)
-            {
-                try { _handleException?.Invoke(ex); }
-                catch { /* handler 异常不压制原始异常 */ }
-                throw;                     // 保留原始异常堆栈
             }
             finally
             {
