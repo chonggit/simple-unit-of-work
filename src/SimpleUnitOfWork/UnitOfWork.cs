@@ -89,11 +89,18 @@ namespace SimpleUnitOfWork
         /// </summary>
         public void Commit()
         {
+            EnsureNotDisposed();
             if (_transaction != null)
             {
-                _transaction.Commit();
-                _transaction.Dispose();
-                _transaction = null;
+                try
+                {
+                    _transaction.Commit();
+                }
+                finally
+                {
+                    _transaction.Dispose();
+                    _transaction = null;
+                }
             }
         }
 
