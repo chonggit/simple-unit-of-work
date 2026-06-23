@@ -15,7 +15,9 @@ namespace SimpleUnitOfWork
         /// </summary>
         public Repository(IUnitOfWork unitOfWork)
         {
-            ArgumentNullException.ThrowIfNull(unitOfWork);
+            // ArgumentNullException.ThrowIfNull(unitOfWork);
+            if (unitOfWork == null)
+                throw new ArgumentNullException(nameof(unitOfWork), "工作单元不能为空。");
             _unitOfWork = unitOfWork;
         }
 
@@ -39,7 +41,7 @@ namespace SimpleUnitOfWork
         /// </summary>
         public virtual long Add(T entity)
         {
-          return Connection.Insert(entity, Transaction, CommandTimeout);
+            return Connection.Insert(entity, Transaction, CommandTimeout);
         }
 
         /// <summary>

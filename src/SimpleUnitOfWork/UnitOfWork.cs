@@ -25,7 +25,9 @@ namespace SimpleUnitOfWork
         /// <param name="connectionFactory"> 数据库连接工厂方法 </param>
         public static void SetConnectionFactory(Func<IDbConnection> connectionFactory)
         {
-            ArgumentNullException.ThrowIfNull(connectionFactory);
+            //ArgumentNullException.ThrowIfNull(connectionFactory);
+            if (connectionFactory == null)
+                throw new ArgumentNullException(nameof(connectionFactory), "Connection factory cannot be null.");
             _connectionFactory = connectionFactory;
         }
 
@@ -109,7 +111,9 @@ namespace SimpleUnitOfWork
         /// </summary>
         public UnitOfWork(IDbConnection connection)
         {
-            ArgumentNullException.ThrowIfNull(connection);
+            //ArgumentNullException.ThrowIfNull(connection);
+            if (connection == null)
+                throw new ArgumentNullException(nameof(connection), "Connection cannot be null.");
             _connection = connection;
         }
 
