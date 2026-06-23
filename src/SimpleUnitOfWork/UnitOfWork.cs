@@ -64,7 +64,8 @@ namespace SimpleUnitOfWork
             get
             {
                 EnsureNotDisposed();
-
+                if (_completed)
+                    throw new InvalidOperationException("This UnitOfWork has already been committed or rolled back.");
                 return _connection;
             }
         }
@@ -106,9 +107,12 @@ namespace SimpleUnitOfWork
         {
             get
             {
-                EnsureNotDisposed();
-                Demand();
-                return _transaction!;
+                lock (_lock)
+                {
+                    EnsureNotDisposed();
+                    Demand();
+                    return _transaction!;
+                }
             }
         }
 
@@ -213,17 +217,18 @@ namespace SimpleUnitOfWork
                 {
                     try
                     {
-                        Rollback();
+                        Rollback();           // CompleteTransaction 已处理异常
                     }
-                    catch (Exception ex)
+                    catch
                     {
-                        _handleException?.Invoke(ex);
+                        // 所有异常在此吞掉 — Dispose 绝不能抛异常
+                        // _handleException 已在 Rollback 内被调用
                     }
-
-                    _connection?.Dispose();
+                    finally
+                    {
+                        _connection.Dispose();  // 构造函数保证 _connection 不为 null
+                    }
                 }
-
-                // 标记为已释放
                 _disposedValue = true;
             }
         }
@@ -240,9 +245,11 @@ namespace SimpleUnitOfWork
         /// </summary>
         public void Dispose()
         {
-            // 不要更改此代码。请将清理代码放入“Dispose(bool disposing)”方法中
-            Dispose(disposing: true);
-            GC.SuppressFinalize(this);
+            lock (_lock)
+            {
+                Dispose(disposing: true);
+                GC.SuppressFinalize(this);
+            }
         }
     }
 }
