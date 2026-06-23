@@ -9,6 +9,8 @@ namespace SimpleUnitOfWork
     {
         private bool _disposedValue;
 
+        private bool _completed;
+
         private IDbTransaction? _transaction;
 
         private IDbConnection _connection;
@@ -68,6 +70,8 @@ namespace SimpleUnitOfWork
         public void Demand(IsolationLevel level)
         {
             EnsureNotDisposed();
+            if (_completed)
+                throw new InvalidOperationException("This UnitOfWork has already been committed or rolled back.");
             if (_transaction == null)
             {
                 if (_connection.State != ConnectionState.Open)
@@ -100,6 +104,7 @@ namespace SimpleUnitOfWork
                 {
                     _transaction.Dispose();
                     _transaction = null;
+                    _completed = true;
                 }
             }
         }
@@ -120,6 +125,7 @@ namespace SimpleUnitOfWork
                 {
                     _transaction.Dispose();
                     _transaction = null;
+                    _completed = true;
                 }
             }
         }
