@@ -20,7 +20,7 @@ namespace SimpleUnitOfWork
         {
             get
             {
-                Demand();
+                EnsureNotDisposed();
 
                 return _connection;
             }
