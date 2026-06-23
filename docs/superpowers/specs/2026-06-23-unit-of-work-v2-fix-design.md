@@ -24,6 +24,8 @@
 | 14 | Repository 求值顺序依赖（误报，仅需注释） | Low | 可维护性 |
 | 15 | 静态字段无同步 | Medium | 线程安全 |
 
+> **设计决策说明：** v1 设计（`2026-06-23-unit-of-work-fix-design.md`）曾将"线程安全 — 工作单元不跨线程共享"列为 YAGNI 排除。v2 代码审查发现的两项线程安全问题（#5 并发 Demand、#15 静态字段 race）属于数据竞争导致资源泄漏的真实 bug，而非防御性加固，因此本设计推翻 v1 的 YAGNI 排除，纳入修复范围。
+
 ### YAGNI 排除
 
 - Repository 读方法强制创建事务（#10）— 设计取舍，保留
@@ -49,7 +51,7 @@
 
 ## 详细设计
 
-### 1. 抽取 `CompleteTransaction(bool throwOnNoTransaction)` 辅助方法
+### 1. 抽取 `CompleteTransaction(Action)` 辅助方法
 
 **动机：** Commit/Rollback 方法体 98% 相同，差异仅 `.Commit()` vs `.Rollback()`。抽成公共方法可消除重复，并集中处理边缘情况。
 
@@ -62,7 +64,8 @@ private void CompleteTransaction(Action<IDbTransaction> action)
             "This UnitOfWork has already been committed or rolled back.");
 
     if (_transaction == null)
-        return;
+        throw new InvalidOperationException(
+            "There is no active transaction to complete. Call Demand() first.");
 
     try
     {
@@ -71,6 +74,9 @@ private void CompleteTransaction(Action<IDbTransaction> action)
     }
     catch (Exception ex)
     {
+        // ⚠ _handleException 在实例锁（_lock）内执行。
+        // handler 应避免阻塞操作、避免调用此 UnitOfWork 实例的方法（可能死锁）。
+        // handler 实现者需保证自己的线程安全（可能被多线程同时调用）。
         try { _handleException?.Invoke(ex); }
         catch { /* handler 异常不压制原始异常 */ }
         throw;                     // 保留原始异常堆栈
@@ -99,6 +105,9 @@ public void Rollback() => CompleteTransaction(t => t.Rollback());
 | action 失败 + handler 成功 | false | null（已 dispose） | 原始异常抛出 |
 | action 失败 + handler 失败 | false | null（已 dispose） | 原始异常抛出 |
 | _transaction.Dispose() 失败 | 见上 | null | 原始异常/无异常 |
+| 未调 Demand() 直接调 Commit/Rollback | false | null | InvalidOperationException |
+
+> **设计说明：** `_transaction == null` 时不再静默返回。调用 Commit()/Rollback() 前必须先通过 `Demand()` 或 `Transaction` getter 创建事务。失败重试流程：`Demand()` → `Commit()` / `Rollback()`。
 
 ### 2. Dispose 路径加固
 
@@ -124,7 +133,7 @@ protected virtual void Dispose(bool disposing)
             }
             finally
             {
-                _connection?.Dispose();  // 保证始终释放连接
+                _connection.Dispose();  // 构造函数保证 _connection 不为 null
             }
         }
         _disposedValue = true;
@@ -143,6 +152,15 @@ protected virtual void Dispose(bool disposing)
 ### 3. 线程安全
 
 **设计原则：** 工作单元不推荐跨线程共享，但库应防止数据竞争导致的资源泄漏和崩溃。
+
+#### 实例字段加 volatile
+
+`_completed` 在 `CompleteTransaction` 中（锁内）写入，在 `Connection` getter 中（无锁）读取。`_disposedValue` 在 `EnsureNotDisposed()` 中（无锁路径）读取，其写入发生在 `Dispose(bool)` 内。两者均声明为 `volatile`：
+
+```csharp
+private volatile bool _disposedValue;
+private volatile bool _completed;
+```
 
 #### 实例方法锁
 
@@ -184,7 +202,9 @@ public IDbTransaction Transaction
 }
 ```
 
-注意：`Connection` getter 不加锁（纯字段读，`_connection` 构造后不变）。`Dispose()` 的 `lock` 需避免重入：补 `_disposedValue` 首检（已在 `Dispose(bool)` 中），`Dispose` 入口加锁。
+注意：`Connection` getter 不加锁（纯字段读，`_connection` 构造后不变）。`_completed` 声明为 `volatile`，在无锁读取时保证可见性。`Dispose()` 入口加锁。
+
+> **可重入锁约束：** `Dispose()` 取 `lock` → `Dispose(bool)` → `Rollback()` → `CompleteTransaction()` 路径依赖 C# `lock`（基于 Monitor）的可重入性。若后续改为 `SemaphoreSlim`、`SpinLock` 等不可重入原语，此路径会死锁。如需切换同步原语，必须将 `_connection?.Dispose()` 等关键清理操作提到锁外或改造为无重入架构。
 
 #### 静态字段 volatile
 
@@ -194,6 +214,8 @@ private static volatile Action<Exception>? _handleException;
 ```
 
 `volatile` 保证 ARM/x86 上所有线程读到最新值，消除 SET 后 GET 仍为空的风险。
+
+> **`_handleException` 线程安全约定：** 引入线程安全后，`_handleException` 委托可能被多线程并发调用（例如两个线程同时 Commit 失败）。`SetHandleException` 的调用者有责任保证传入的 handler 是线程安全的——或者无副作用，或者使用自己的同步机制。
 
 #### 线程安全边界
 
@@ -223,13 +245,19 @@ private void EnsureConnectionOpen()
 {
     if (_connection.State == ConnectionState.Open)
         return;
+
     if (_connection.State == ConnectionState.Broken)
-        _connection.Close();
+    {
+        try { _connection.Close(); }
+        catch { /* Close() 在部分 ADO.NET 实现中对 Broken 连接可能抛出。吞掉后尝试 Open() */ }
+    }
     _connection.Open();
 }
 ```
 
 调用位置在 `Demand(level)` 中原 `_connection.Open()` 处替换为 `EnsureConnectionOpen()`。
+
+> **关于 ConnectionState 枚举的其他值：** 本方法只处理 `Open` 和 `Broken`。`Connecting`(2)、`Executing`(4)、`Fetching`(8) 是瞬态值，连接处于这些状态时说明外部操作正在进行中——此时调用 `Open()` 由底层 ADO.NET 驱动决定行为（多数驱动抛 `InvalidOperationException`）。调用者应避免在连接有未完成任务时调用 `Demand()`。
 
 #### 4b. Create() 工厂返回 null 检查
 
@@ -288,8 +316,10 @@ public IDbConnection Connection
 | 场景 | 改前 | 改后 |
 |------|------|------|
 | Commit 后重试 | `_completed = true` 锁定，不能重试 | `_completed` 仅成功后置 true，失败可重试 |
+| Commit 失败后再 Commit | 重试 (silent no-op, _transaction == null) | 抛 `InvalidOperationException`，"没有活跃事务，先调 Demand()" |
 | Commit 后再次 Commit | 静默无操作 | 抛 `InvalidOperationException` |
 | Rollback 后 Commit | 静默无操作 | 抛 `InvalidOperationException` |
+| Commit 失败后正确重试流程 | 无此语义 | 捕获异常 → `Demand()` → 重新执行工作 → `Commit()` |
 | _handleException 在 catch 内抛 | 压制原始异常 | handler 异常被吞，原始异常保留 |
 | Dispose 时 Rollback 失败 + handler 被调 | handler 调两次 | handler 仅被 Rollback 调用一次 |
 | Dispose 时 _connection.Dispose() | 若 handler 抛则跳过 | finally 块保证执行 |
