@@ -109,11 +109,18 @@ namespace SimpleUnitOfWork
         /// </summary>
         public void Rollback()
         {
+            EnsureNotDisposed();
             if (_transaction != null)
             {
-                _transaction.Rollback();
-                _transaction.Dispose();
-                _transaction = null;
+                try
+                {
+                    _transaction.Rollback();
+                }
+                finally
+                {
+                    _transaction.Dispose();
+                    _transaction = null;
+                }
             }
         }
 
