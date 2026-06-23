@@ -7,17 +7,19 @@ namespace SimpleUnitOfWork
     /// </summary>
     public class UnitOfWork : IUnitOfWork
     {
-        private bool _disposedValue;
+        private volatile bool _disposedValue;
 
-        private bool _completed;
+        private volatile bool _completed;
 
         private IDbTransaction? _transaction;
 
         private IDbConnection _connection;
 
-        private static Func<IDbConnection>? _connectionFactory;
+        private static volatile Func<IDbConnection>? _connectionFactory;
 
-        private static Action<Exception>? _handleException;
+        private static volatile Action<Exception>? _handleException;
+
+        private readonly object _lock = new();
 
         /// <summary>
         /// 设置全局异常处理器，用于处理工作单元操作中发生的异常。此方法应在创建任何工作单元实例之前调用。
@@ -25,6 +27,7 @@ namespace SimpleUnitOfWork
         /// <param name="handler"> 异常处理器 </param>
         public static void SetHandleException(Action<Exception> handler)
         {
+            ArgumentNullException.ThrowIfNull(handler);
             _handleException = handler;
         }
 
@@ -44,9 +47,12 @@ namespace SimpleUnitOfWork
         /// <exception cref="InvalidOperationException"></exception>
         public static IUnitOfWork Create()
         {
-            if (_connectionFactory == null)
+            var factory = _connectionFactory;
+            if (factory == null)
                 throw new InvalidOperationException("Connection factory is not set. Call SetConnectionFactory first.");
-            var connection = _connectionFactory();
+            var connection = factory();
+            if (connection == null)
+                throw new InvalidOperationException("Connection factory returned null.");
             return new UnitOfWork(connection);
         }
 
