@@ -133,14 +133,16 @@ namespace SimpleUnitOfWork
             {
                 if (disposing)
                 {
-
-                    // 释放托管资源：回滚未提交事务并释放连接
-                    Rollback();
-
-                    if (Connection != null)
+                    try
                     {
-                        Connection.Dispose();
+                        Rollback();
                     }
+                    catch
+                    {
+                        // Dispose 绝不能抛异常 — 吞掉 Rollback 的失败
+                    }
+
+                    _connection?.Dispose();
                 }
 
                 // 标记为已释放
