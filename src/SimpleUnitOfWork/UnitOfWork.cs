@@ -47,6 +47,7 @@ namespace SimpleUnitOfWork
         {
             get
             {
+                EnsureNotDisposed();
                 Demand();
                 return _transaction!;
             }
