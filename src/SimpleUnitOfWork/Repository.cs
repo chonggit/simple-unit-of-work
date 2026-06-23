@@ -15,6 +15,7 @@ namespace SimpleUnitOfWork
         /// </summary>
         public Repository(IUnitOfWork unitOfWork)
         {
+            ArgumentNullException.ThrowIfNull(unitOfWork);
             _unitOfWork = unitOfWork;
         }
 
