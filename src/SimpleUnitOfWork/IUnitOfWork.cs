@@ -31,5 +31,10 @@ namespace SimpleUnitOfWork
         /// 回滚当前事务。
         /// </summary>
         void Rollback();
+
+        /// <summary>
+        /// 需求一个事务，如果当前没有事务，则创建一个新的事务。
+        /// </summary>
+        void Demand(IsolationLevel level);
     }
 }
