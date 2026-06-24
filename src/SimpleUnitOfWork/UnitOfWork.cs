@@ -17,6 +17,8 @@ namespace SimpleUnitOfWork
 
         private static volatile Func<IDbConnection>? _connectionFactory;
 
+        private IsolationLevel _isolationLevel = IsolationLevel.ReadCommitted;
+
         private readonly object _lock = new();
 
         /// <summary>
@@ -119,6 +121,7 @@ namespace SimpleUnitOfWork
 
         /// <summary>
         /// 根据指定隔离级别创建事务（如果尚未存在）。
+        /// 如果事务已存在但隔离级别与当前记录不一致，则抛出异常。
         /// </summary>
         public void Demand(IsolationLevel level)
         {
@@ -127,20 +130,25 @@ namespace SimpleUnitOfWork
                 EnsureNotDisposed();
                 if (_completed)
                     throw new InvalidOperationException("This UnitOfWork has already been committed or rolled back.");
-                if (_transaction == null)
+                if (_transaction != null)
                 {
-                    EnsureConnectionOpen();
-                    _transaction = _connection.BeginTransaction(level);
+                    if (_isolationLevel != level)
+                        throw new InvalidOperationException(
+                            $"事务已存在，等级不匹配：当前为 {_isolationLevel}，传入为 {level}。");
+                    return;
                 }
+                _isolationLevel = level;
+                EnsureConnectionOpen();
+                _transaction = _connection.BeginTransaction(level);
             }
         }
 
         /// <summary>
-        /// 创建默认隔离级别（ReadCommitted）的事务（如果尚未存在）。
+        /// 确保事务已存在。如果尚无事务，使用当前记录的默认隔离级别创建。
         /// </summary>
         public void Demand()
         {
-            Demand(IsolationLevel.ReadCommitted);
+            Demand(_isolationLevel);
         }
 
         /// <summary>
