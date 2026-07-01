@@ -19,7 +19,7 @@ IUnitOfWork (行为)             IUnitOfWorkContext (状态)        IRepository<
 │ Commit()             │      │ IDbConnection Connection│      │ Add / Update         │
 │ Rollback()           │      │ IDbTransaction? Trans.  │      │ Delete / GetById     │
 │ Demand(IsolationLv)  │      │ int CommandTimeout      │      │ GetAll               │
-│ GetRepository<T>()   │      │ Dispose()               │      │ (sync + async)       │
+│                     │      │ Dispose()               │      │ (sync + async)       │
 │ Dispose()            │      └────────────────────────┘      └──────────────────────┘
 └──────────────────────┘                 ▲                              ▲
          ▲                               │                              │
@@ -29,12 +29,15 @@ IUnitOfWork (行为)             IUnitOfWorkContext (状态)        IRepository<
     │ - static factory    │
     │ - thread safety     │
     │ - owns Context      │
+    │ - GetRepository<T>()│
     └─────────────────────┘
 ```
 
 ## 接口定义
 
 ### IUnitOfWorkContext（新增）
+
+`IUnitOfWorkContext` 为 `public` 接口，因为 `Repository<T>` 构造函数接收它，允许外部单元测试时 mock 或自行实现。但正常情况下不鼓励直接使用——通过 `UnitOfWork.GetRepository<T>()` 间接访问。`UnitOfWorkContext` 实现类标记为 `internal`。`Transaction` setter 为 `internal`，仅由 `UnitOfWork` 在 `Demand()` 锁内写入。
 
 ```csharp
 public interface IUnitOfWorkContext : IDisposable
@@ -96,6 +99,9 @@ public interface IRepository<T> where T : class, new()
 | 成员 | 说明 |
 |------|------|
 | `_context` | `UnitOfWorkContext` 实例，生命周期由 `UnitOfWork` 管理 |
+| `Connection` | 委托 `_context.Connection`，含完成守卫（不对外公开，仅 `internal` 通过 `Context` 属性暴露） |
+| `Transaction` | 委托 `_context.Transaction`，含完成守卫（不对外公开） |
+| `CommandTimeout` | 委托 `_context.CommandTimeout`（不对外公开） |
 | `Demand(level)` | 委托给原实现，写入 `_context.Transaction`（通过 `internal set`） |
 | `Commit()` | 原 `CompleteTransaction` 逻辑，设置 `_completed = true` |
 | `Rollback()` | 同 Commit，回滚后设置 `_completed = true` |
@@ -170,7 +176,7 @@ var repo = uow.GetRepository<CustomerRepository>();
 uow.Demand(IsolationLevel.ReadCommitted);
 repo.Add(entity);
 uow.Commit();
-// uow.Dispose() → Rollback 无操作（已提交）→ _context.Dispose()
+// uow.Dispose() → Rollback（已 completed，内部抛 InvalidOperationException 被 Dispose 吞掉）→ _context.Dispose()
 ```
 
 ```
@@ -184,7 +190,7 @@ catch
     uow.Rollback();   // _completed = true
     throw;
 }
-// uow.Dispose() → Rollback 无操作（已 completed）→ _context.Dispose()
+// uow.Dispose() → Rollback（已 completed，内部抛 InvalidOperationException 被 Dispose 吞掉）→ _context.Dispose()
 ```
 
 ## 调用方迁移
@@ -194,6 +200,7 @@ catch
 | 现状 | 重构后 |
 |------|--------|
 | `repo = new Repository<T>(uow)` | `repo = uow.GetRepository<TRepository>()` |
+| `class MyRepo : Repository<T>` 直接 new | 构造函数参数从 `IUnitOfWork` 改为 `IUnitOfWorkContext`；或通过 `GetRepository<MyRepo>()` 由反射创建 |
 | `uow.Connection` | 移除，通过 `IUnitOfWorkContext` 获取 |
 | `uow.Transaction` | 移除，通过 `IUnitOfWorkContext` 获取 |
 | `uow.CommandTimeout` | 移除，通过 `IUnitOfWorkContext` 获取 |
