@@ -23,5 +23,14 @@ namespace SimpleUnitOfWork
         /// </summary>
         /// <param name="level">事务隔离级别</param>
         void Demand(IsolationLevel level);
+
+        /// <summary>
+        /// 获取与当前工作单元关联的仓储实例。
+        /// 返回继承自 Repository&lt;T&gt; 并实现 IRepository&lt;T&gt; 的仓储类型。
+        /// </summary>
+        /// <typeparam name="TRepository">仓储类型，必须具有接受 IUnitOfWorkContext 的构造函数</typeparam>
+        /// <returns>仓储实例</returns>
+        /// <exception cref="InvalidOperationException">找不到匹配的构造函数</exception>
+        TRepository GetRepository<TRepository>() where TRepository : class;
     }
 }
