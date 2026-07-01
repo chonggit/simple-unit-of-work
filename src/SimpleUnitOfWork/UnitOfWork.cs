@@ -1,9 +1,11 @@
-﻿using System.Data;
+using System.Data;
+using System.Reflection;
 
 namespace SimpleUnitOfWork
 {
     /// <summary>
     /// 工作单元实现，管理数据库连接与事务的生命周期，并提供提交/回滚操作。
+    /// 内部使用 <see cref="UnitOfWorkContext"/> 管理连接、事务和超时状态。
     /// </summary>
     public class UnitOfWork : IUnitOfWork
     {
@@ -11,9 +13,7 @@ namespace SimpleUnitOfWork
 
         private volatile bool _completed;
 
-        private IDbTransaction? _transaction;
-
-        private IDbConnection _connection;
+        private readonly UnitOfWorkContext _context;
 
         private static volatile Func<IDbConnection>? _connectionFactory;
 
@@ -22,12 +22,16 @@ namespace SimpleUnitOfWork
         private readonly object _lock = new();
 
         /// <summary>
+        /// 内部上下文，供 GetRepository&lt;T&gt; 使用，也可用于向下兼容场景。
+        /// </summary>
+        internal IUnitOfWorkContext Context => _context;
+
+        /// <summary>
         /// 设置用于创建数据库连接的工厂方法。此方法应在创建任何工作单元实例之前调用。
         /// </summary>
-        /// <param name="connectionFactory"> 数据库连接工厂方法 </param>
+        /// <param name="connectionFactory">数据库连接工厂方法</param>
         public static void SetConnectionFactory(Func<IDbConnection> connectionFactory)
         {
-            //ArgumentNullException.ThrowIfNull(connectionFactory);
             if (connectionFactory == null)
                 throw new ArgumentNullException(nameof(connectionFactory), "Connection factory cannot be null.");
             _connectionFactory = connectionFactory;
@@ -36,7 +40,7 @@ namespace SimpleUnitOfWork
         /// <summary>
         /// 创建一个新的工作单元实例，使用预先设置的连接工厂生成数据库连接。
         /// </summary>
-        /// <exception cref="InvalidOperationException"></exception>
+        /// <exception cref="InvalidOperationException">连接工厂未设置或返回 null</exception>
         public static IUnitOfWork Create()
         {
             var factory = _connectionFactory;
@@ -49,23 +53,15 @@ namespace SimpleUnitOfWork
         }
 
         /// <summary>
-        /// 当前数据库连接，首次访问时确保已初始化事务或直接返回连接。
+        /// 构造函数，传入可用的数据库连接。
         /// </summary>
-        public IDbConnection Connection
+        /// <param name="connection">数据库连接，不能为 null</param>
+        public UnitOfWork(IDbConnection connection)
         {
-            get
-            {
-                EnsureNotDisposed();
-                if (_completed)
-                    throw new InvalidOperationException("This UnitOfWork has already been committed or rolled back.");
-                return _connection;
-            }
+            if (connection == null)
+                throw new ArgumentNullException(nameof(connection), "Connection cannot be null.");
+            _context = new UnitOfWorkContext(connection, () => _completed);
         }
-
-        /// <summary>
-        /// 命令超时时间（秒），默认 30 秒。
-        /// </summary>
-        public int CommandTimeout { get; set; } = 30;
 
         /// <summary>
         /// 检查当前实例是否已释放，若已释放则抛出 <see cref="ObjectDisposedException"/>。
@@ -81,42 +77,16 @@ namespace SimpleUnitOfWork
         /// </summary>
         private void EnsureConnectionOpen()
         {
-            if (_connection.State == ConnectionState.Open)
+            var connection = _context.Connection; // 通过 Context 获取（含完成守卫）
+            if (connection.State == ConnectionState.Open)
                 return;
 
-            if (_connection.State == ConnectionState.Broken)
+            if (connection.State == ConnectionState.Broken)
             {
-                try { _connection.Close(); }
-                catch { /* Close() 在部分 ADO.NET 实现中对 Broken 连接可能抛出。吞掉后尝试 Open() */ }
+                try { connection.Close(); }
+                catch { /* Close() 在部分 ADO.NET 实现中对 Broken 连接可能抛出 */ }
             }
-            _connection.Open();
-        }
-
-        /// <summary>
-        /// 当前活动事务。访问之前会确保事务已创建。
-        /// </summary>
-        public IDbTransaction Transaction
-        {
-            get
-            {
-                lock (_lock)
-                {
-                    EnsureNotDisposed();
-                    Demand();
-                    return _transaction!;
-                }
-            }
-        }
-
-        /// <summary>
-        /// 构造函数，传入可用的数据库连接。
-        /// </summary>
-        public UnitOfWork(IDbConnection connection)
-        {
-            //ArgumentNullException.ThrowIfNull(connection);
-            if (connection == null)
-                throw new ArgumentNullException(nameof(connection), "Connection cannot be null.");
-            _connection = connection;
+            connection.Open();
         }
 
         /// <summary>
@@ -130,7 +100,7 @@ namespace SimpleUnitOfWork
                 EnsureNotDisposed();
                 if (_completed)
                     throw new InvalidOperationException("This UnitOfWork has already been committed or rolled back.");
-                if (_transaction != null)
+                if (_context.Transaction != null)
                 {
                     if (_isolationLevel != level)
                         throw new InvalidOperationException(
@@ -139,7 +109,7 @@ namespace SimpleUnitOfWork
                 }
                 _isolationLevel = level;
                 EnsureConnectionOpen();
-                _transaction = _connection.BeginTransaction(level);
+                _context.Transaction = _context.Connection.BeginTransaction(level);
             }
         }
 
@@ -153,8 +123,6 @@ namespace SimpleUnitOfWork
 
         /// <summary>
         /// 执行事务提交/回滚操作的公共骨架。处理 _completed 守卫、异常处理、资源清理。
-        /// 调用前调用者应已持有 _lock。
-        /// ⚠ _handleException 在实例锁（_lock）内执行，handler 应避免阻塞或调用此实例的方法。
         /// </summary>
         private void CompleteTransaction(Action<IDbTransaction> action)
         {
@@ -162,19 +130,20 @@ namespace SimpleUnitOfWork
             if (_completed)
                 throw new InvalidOperationException("This UnitOfWork has already been committed or rolled back.");
 
-            if (_transaction == null)
+            var transaction = _context.Transaction;
+            if (transaction == null)
                 throw new InvalidOperationException("There is no active transaction to complete. Call Demand() first.");
 
             try
             {
-                action(_transaction);
-                _completed = true;        // 仅在成功后设置，允许失败后重试
+                action(transaction);
+                _completed = true;
             }
             finally
             {
-                try { _transaction.Dispose(); }
+                try { transaction.Dispose(); }
                 catch { /* Dispose 失败不能掩饰 commit/rollback 的异常 */ }
-                _transaction = null;
+                _context.Transaction = null;
             }
         }
 
@@ -201,7 +170,23 @@ namespace SimpleUnitOfWork
         }
 
         /// <summary>
-        /// 释放资源的受保护实现，按需回滚未提交的事务并释放连接。
+        /// 获取与当前工作单元关联的仓储实例。
+        /// 返回继承自 Repository&lt;T&gt; 并实现 IRepository&lt;T&gt; 的仓储类型。
+        /// </summary>
+        /// <typeparam name="TRepository">仓储类型，必须具有接受 IUnitOfWorkContext 的构造函数</typeparam>
+        /// <returns>仓储实例</returns>
+        /// <exception cref="InvalidOperationException">找不到匹配的构造函数</exception>
+        public TRepository GetRepository<TRepository>() where TRepository : class
+        {
+            var ctor = typeof(TRepository).GetConstructor(new[] { typeof(IUnitOfWorkContext) });
+            if (ctor == null)
+                throw new InvalidOperationException(
+                    $"{typeof(TRepository).Name} must have a constructor that accepts IUnitOfWorkContext.");
+            return (TRepository)ctor.Invoke(new object[] { Context });
+        }
+
+        /// <summary>
+        /// 释放资源的受保护实现，按需回滚未提交的事务并释放上下文。
         /// </summary>
         protected virtual void Dispose(bool disposing)
         {
@@ -211,28 +196,20 @@ namespace SimpleUnitOfWork
                 {
                     try
                     {
-                        Rollback();           // CompleteTransaction 已处理异常
+                        Rollback(); // CompleteTransaction 已处理异常
                     }
                     catch
                     {
                         // 所有异常在此吞掉 — Dispose 绝不能抛异常
-                        // _handleException 已在 Rollback 内被调用
                     }
                     finally
                     {
-                        _connection.Dispose();  // 构造函数保证 _connection 不为 null
+                        _context.Dispose(); // 会释放 Transaction（如未释放）和 Connection
                     }
                 }
                 _disposedValue = true;
             }
         }
-
-        // // TODO: 仅当“Dispose(bool disposing)”拥有用于释放未托管资源的代码时才替代终结器
-        // ~UnitOfWork()
-        // {
-        //     // 不要更改此代码。请将清理代码放入“Dispose(bool disposing)”方法中
-        //     Dispose(disposing: false);
-        // }
 
         /// <summary>
         /// 释放所有资源，调用受保护的 Dispose 实现并禁止终结器运行。
