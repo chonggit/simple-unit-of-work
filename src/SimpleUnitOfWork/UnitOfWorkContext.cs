@@ -29,7 +29,7 @@ namespace SimpleUnitOfWork
         }
 
         /// <summary>
-        /// 当前活动事务，可能为 null（尚未调用 Demand 或已完成）。完成守卫生效后访问抛出 InvalidOperationException。
+        /// 当前活动事务，可能为 null（尚未调用 Demand 或已完成）。Commit/Rollback 后为 null。
         /// Transaction setter 为 internal，仅由 UnitOfWork.Demand() 在锁内写入。
         /// </summary>
         public IDbTransaction? Transaction { get; internal set; }
@@ -49,8 +49,10 @@ namespace SimpleUnitOfWork
         {
             if (connection == null)
                 throw new ArgumentNullException(nameof(connection), "Connection cannot be null.");
+            if (isCompleted == null)
+                throw new ArgumentNullException(nameof(isCompleted));
             _connection = connection;
-            _isCompleted = isCompleted ?? throw new ArgumentNullException(nameof(isCompleted));
+            _isCompleted = isCompleted;
         }
 
         /// <summary>
@@ -64,7 +66,8 @@ namespace SimpleUnitOfWork
                 catch { /* Dispose 失败不抛异常 */ }
                 Transaction = null;
 
-                _connection.Dispose();
+                try { _connection.Dispose(); }
+                catch { /* Dispose 失败不抛异常 */ }
                 _disposed = true;
             }
         }
