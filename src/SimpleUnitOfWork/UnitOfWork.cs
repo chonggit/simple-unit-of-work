@@ -38,10 +38,33 @@ namespace SimpleUnitOfWork
         }
 
         /// <summary>
-        /// 创建一个新的工作单元实例，使用预先设置的连接工厂生成数据库连接。
+        /// 使用连接工厂创建 UnitOfWork（自动开启事务，ReadCommitted 隔离级别）。
         /// </summary>
-        /// <exception cref="InvalidOperationException">连接工厂未设置或返回 null</exception>
         public static IUnitOfWork Create()
+        {
+            return CreateCore(autoTransaction: true, IsolationLevel.ReadCommitted);
+        }
+
+        /// <summary>
+        /// 使用连接工厂创建 UnitOfWork，指定是否自动开启事务。
+        /// </summary>
+        public static IUnitOfWork Create(bool autoTransaction)
+        {
+            return CreateCore(autoTransaction, IsolationLevel.ReadCommitted);
+        }
+
+        /// <summary>
+        /// 使用连接工厂创建 UnitOfWork，指定是否自动开启事务及隔离级别。
+        /// </summary>
+        public static IUnitOfWork Create(bool autoTransaction, IsolationLevel isolationLevel)
+        {
+            return CreateCore(autoTransaction, isolationLevel);
+        }
+
+        /// <summary>
+        /// 核心工厂方法：创建连接、构造 UnitOfWork，构造函数失败时释放连接以防泄漏。
+        /// </summary>
+        private static IUnitOfWork CreateCore(bool autoTransaction, IsolationLevel isolationLevel)
         {
             var factory = _connectionFactory;
             if (factory == null)
@@ -49,7 +72,17 @@ namespace SimpleUnitOfWork
             var connection = factory();
             if (connection == null)
                 throw new InvalidOperationException("Connection factory returned null.");
-            return new UnitOfWork(connection);
+            try
+            {
+                return new UnitOfWork(connection, autoTransaction, isolationLevel);
+            }
+            catch
+            {
+                // 构造函数失败（如 autoTransaction=true 时 Demand() 抛异常），释放连接
+                try { connection.Dispose(); }
+                catch { /* Dispose 失败不抛异常 */ }
+                throw;
+            }
         }
 
         /// <summary>
