@@ -56,11 +56,21 @@ namespace SimpleUnitOfWork
         /// 构造函数，传入可用的数据库连接。
         /// </summary>
         /// <param name="connection">数据库连接，不能为 null</param>
-        public UnitOfWork(IDbConnection connection)
+        /// <param name="autoTransaction">是否自动开启事务，默认 true。false 时需要手动调用 Demand() 或完全不使用事务。</param>
+        /// <param name="isolationLevel">事务隔离级别，始终存入 _isolationLevel 字段。</param>
+        public UnitOfWork(
+            IDbConnection connection,
+            bool autoTransaction = true,
+            IsolationLevel isolationLevel = IsolationLevel.ReadCommitted)
         {
             if (connection == null)
                 throw new ArgumentNullException(nameof(connection), "Connection cannot be null.");
+            _isolationLevel = isolationLevel;
             _context = new UnitOfWorkContext(connection, () => _completed);
+            if (autoTransaction)
+            {
+                Demand(isolationLevel);
+            }
         }
 
         /// <summary>
