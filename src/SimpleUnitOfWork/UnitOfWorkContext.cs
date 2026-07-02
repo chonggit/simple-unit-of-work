@@ -15,6 +15,8 @@ namespace SimpleUnitOfWork
 
         private volatile bool _disposed;
 
+        private volatile bool _hasUntransactedAccess;
+
         /// <summary>
         /// 当前数据库连接。完成守卫生效后访问抛出 InvalidOperationException。
         /// </summary>
@@ -24,6 +26,8 @@ namespace SimpleUnitOfWork
             {
                 if (_isCompleted())
                     throw new InvalidOperationException("This UnitOfWork has already been committed or rolled back.");
+                if (Transaction == null)
+                    _hasUntransactedAccess = true;
                 return _connection;
             }
         }
@@ -38,6 +42,15 @@ namespace SimpleUnitOfWork
         /// 命令超时时间（秒），默认 30 秒。
         /// </summary>
         public int CommandTimeout { get; set; } = 30;
+
+        /// <summary>
+        /// 是否在无事务状态下访问过连接。由 Connection getter 自动置位，Demand() 内部检查后重置。
+        /// </summary>
+        internal bool HasUntransactedAccess
+        {
+            get => _hasUntransactedAccess;
+            set => _hasUntransactedAccess = value;
+        }
 
         /// <summary>
         /// 创建上下文实例，传入数据库连接和完成状态回调。
