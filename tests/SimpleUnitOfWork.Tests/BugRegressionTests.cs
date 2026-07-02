@@ -9,18 +9,16 @@ public class BugRegressionTests
     /// <summary>
     /// Bug #1: 当 Demand() 内的 BeginTransaction 抛异常后，
     /// _hasUntransactedAccess 标记未被重置，导致后续所有 Demand() 调用失败。
-    /// 预期：第二次 Demand() 应该能成功创建事务（标记应在异常路径上也重置，或不在失败路径上置位）。
+    /// 预期：第二次 Demand() 应该能成功创建事务。
     /// </summary>
     [Fact]
     public void Demand_ShouldAllowRetry_AfterBeginTransactionFailure()
     {
-        // Arrange: connection 是 Open 状态，跳过 EnsureConnectionOpen 的 Open/Broken 逻辑
         var mockConn = new Mock<IDbConnection>();
         mockConn.Setup(c => c.State).Returns(ConnectionState.Open);
 
         var mockTran = new Mock<IDbTransaction>();
 
-        // 第一次 BeginTransaction 抛异常，第二次成功
         var callCount = 0;
         mockConn.Setup(c => c.BeginTransaction(It.IsAny<IsolationLevel>()))
             .Returns(() =>
@@ -33,81 +31,108 @@ public class BugRegressionTests
 
         var uow = new UnitOfWork(mockConn.Object, autoTransaction: false);
 
-        // 第一次 Demand 应该抛异常（BeginTransaction 失败）
         Assert.Throws<Exception>(() => uow.Demand(IsolationLevel.ReadCommitted));
 
-        // Bug: 第二次 Demand 应该能成功创建事务
-        // 当前代码在 BeginTransaction 失败后 _hasUntransactedAccess 永久为 true，
-        // 导致这里抛出 InvalidOperationException("无法开启事务...")
         var ex = Record.Exception(() => uow.Demand(IsolationLevel.ReadCommitted));
-        Assert.Null(ex); // 不应该抛异常，应能重试
+        Assert.Null(ex);
     }
 
     /// <summary>
-    /// Bug #2: 构造函数内 Demand() 失败后，_context 未被释放，导致连接泄漏。
-    /// 直接调用构造函数（不走 CreateCore）时，若 Demand 失败，连接无人释放。
-    /// 修复后：构造函数应在失败时清理 _context。
+    /// Bug #2: 构造函数内 Demand() 失败后，_context 未被释放。
     /// </summary>
     [Fact]
     public void Constructor_ShouldDisposeConnection_WhenAutoTransactionFails()
     {
-        // Arrange
         var mockConn = new Mock<IDbConnection>();
         mockConn.Setup(c => c.State).Returns(ConnectionState.Open);
         mockConn.Setup(c => c.BeginTransaction(It.IsAny<IsolationLevel>()))
             .Throws(new Exception("Simulated DB failure"));
 
-        // Act: 直接构造，不经过 CreateCore
         try { _ = new UnitOfWork(mockConn.Object, autoTransaction: true); }
         catch (Exception) { /* 预期抛出 */ }
 
-        // Assert: 构造函数应清理已创建的 _context（其 Dispose 会释放连接）
         mockConn.Verify(c => c.Dispose(), Times.AtLeastOnce);
     }
 
     /// <summary>
     /// Bug #3: GetRepository 缺少 Dispose 守卫。
-    /// Dispose 后仍可成功创建 Repository，后续 CRUD 操作抛底层异常。
     /// </summary>
     [Fact]
     public void GetRepository_ShouldThrowObjectDisposedException_AfterDispose()
     {
-        // Arrange
         var mockConn = new Mock<IDbConnection>();
         mockConn.Setup(c => c.State).Returns(ConnectionState.Open);
         var uow = new UnitOfWork(mockConn.Object, autoTransaction: false);
-
-        // Act: Dispose the UnitOfWork
         uow.Dispose();
 
-        // Assert: GetRepository 应该在已释放时抛出 ObjectDisposedException
         Assert.Throws<ObjectDisposedException>(() => uow.GetRepository<FakeRepository>());
     }
 
     /// <summary>
-    /// Bug #4: UnitOfWorkContext.Connection getter 缺乏 _disposed 守卫。
-    /// Dispose 后访问 Context.Connection 应抛出异常，而非返回已释放的连接。
+    /// Bug #4: Connection getter 缺 _disposed 守卫。
     /// </summary>
     [Fact]
     public void ContextConnection_ShouldThrow_AfterDisposeWithoutTransaction()
     {
-        // Arrange
         var mockConn = new Mock<IDbConnection>();
         mockConn.Setup(c => c.State).Returns(ConnectionState.Open);
         var uow = new UnitOfWork(mockConn.Object, autoTransaction: false);
-
-        // Act: 不调用 Demand/Commit/Rollback，直接 Dispose
         uow.Dispose();
 
-        // Assert: 访问 Context.Connection 应抛出异常
-        // 当前代码返回已释放的连接（无声失败）
-        var context = ((UnitOfWork)uow).Context; // 需要 InternalsVisibleTo
+        var context = ((UnitOfWork)uow).Context;
         Assert.Throws<ObjectDisposedException>(() => { _ = context.Connection; });
+    }
+
+    /// <summary>
+    /// Bug #5: Transaction 属性在 lock 内写入但 getter 无锁读取，需要 volatile 保障。
+    /// </summary>
+    [Fact]
+    public void Transaction_ShouldBeVisible_AfterDemand_WithoutLock()
+    {
+        var mockConn = CreateOpenConnection();
+        var mockTran = new Mock<IDbTransaction>();
+        mockConn.Setup(c => c.BeginTransaction(It.IsAny<IsolationLevel>()))
+            .Returns(mockTran.Object);
+
+        var uow = new UnitOfWork(mockConn.Object, autoTransaction: false);
+        uow.Demand(IsolationLevel.ReadCommitted);
+
+        var context = ((UnitOfWork)uow).Context;
+        var tran = context.Transaction;
+
+        Assert.NotNull(tran);
+        Assert.Same(mockTran.Object, tran);
+    }
+
+    /// <summary>
+    /// Bug #5: Transaction 在 Rollback 清零后应可见为 null。
+    /// </summary>
+    [Fact]
+    public void Transaction_ShouldBeNull_AfterRollback_WithoutLock()
+    {
+        var mockConn = CreateOpenConnection();
+        var mockTran = new Mock<IDbTransaction>();
+        mockConn.Setup(c => c.BeginTransaction(It.IsAny<IsolationLevel>()))
+            .Returns(mockTran.Object);
+
+        var uow = new UnitOfWork(mockConn.Object, autoTransaction: false);
+        uow.Demand();
+        uow.Rollback();
+
+        var context = ((UnitOfWork)uow).Context;
+        Assert.Null(context.Transaction);
+    }
+
+    private static Mock<IDbConnection> CreateOpenConnection()
+    {
+        var mock = new Mock<IDbConnection>();
+        mock.Setup(c => c.State).Returns(ConnectionState.Open);
+        return mock;
     }
 }
 
 /// <summary>
-/// 用于测试的假仓储，必须具有接受 IUnitOfWorkContext 的公开构造函数。
+/// 用于测试的假仓储。
 /// </summary>
 public class FakeRepository : Repository<FakeEntity>
 {

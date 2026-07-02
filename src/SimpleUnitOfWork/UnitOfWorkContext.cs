@@ -34,11 +34,17 @@ namespace SimpleUnitOfWork
             }
         }
 
+        private volatile IDbTransaction? _transaction;
+
         /// <summary>
         /// 当前活动事务，可能为 null（尚未调用 Demand 或已完成）。Commit/Rollback 后为 null。
         /// Transaction setter 为 internal，仅由 UnitOfWork.Demand() 在锁内写入。
         /// </summary>
-        public IDbTransaction? Transaction { get; internal set; }
+        public IDbTransaction? Transaction
+        {
+            get => _transaction;
+            internal set => _transaction = value;
+        }
 
         /// <summary>
         /// 命令超时时间（秒），默认 30 秒。
