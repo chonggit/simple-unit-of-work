@@ -18,12 +18,14 @@ namespace SimpleUnitOfWork
         private volatile bool _hasUntransactedAccess;
 
         /// <summary>
-        /// 当前数据库连接。完成守卫生效后访问抛出 InvalidOperationException。
+        /// 当前数据库连接。已释放或完成守卫生效后访问抛出异常。
         /// </summary>
         public IDbConnection Connection
         {
             get
             {
+                if (_disposed)
+                    throw new ObjectDisposedException(nameof(UnitOfWorkContext));
                 if (_isCompleted())
                     throw new InvalidOperationException("This UnitOfWork has already been committed or rolled back.");
                 if (Transaction == null)

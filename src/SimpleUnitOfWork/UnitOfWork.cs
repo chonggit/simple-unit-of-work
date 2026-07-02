@@ -248,6 +248,7 @@ namespace SimpleUnitOfWork
         /// <exception cref="InvalidOperationException">找不到匹配的构造函数</exception>
         public TRepository GetRepository<TRepository>() where TRepository : class
         {
+            EnsureNotDisposed();
             var ctor = typeof(TRepository).GetConstructor(new[] { typeof(IUnitOfWorkContext) });
             if (ctor == null)
                 throw new InvalidOperationException(

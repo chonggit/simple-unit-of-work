@@ -64,4 +64,58 @@ public class BugRegressionTests
         // Assert: 构造函数应清理已创建的 _context（其 Dispose 会释放连接）
         mockConn.Verify(c => c.Dispose(), Times.AtLeastOnce);
     }
+
+    /// <summary>
+    /// Bug #3: GetRepository 缺少 Dispose 守卫。
+    /// Dispose 后仍可成功创建 Repository，后续 CRUD 操作抛底层异常。
+    /// </summary>
+    [Fact]
+    public void GetRepository_ShouldThrowObjectDisposedException_AfterDispose()
+    {
+        // Arrange
+        var mockConn = new Mock<IDbConnection>();
+        mockConn.Setup(c => c.State).Returns(ConnectionState.Open);
+        var uow = new UnitOfWork(mockConn.Object, autoTransaction: false);
+
+        // Act: Dispose the UnitOfWork
+        uow.Dispose();
+
+        // Assert: GetRepository 应该在已释放时抛出 ObjectDisposedException
+        Assert.Throws<ObjectDisposedException>(() => uow.GetRepository<FakeRepository>());
+    }
+
+    /// <summary>
+    /// Bug #4: UnitOfWorkContext.Connection getter 缺乏 _disposed 守卫。
+    /// Dispose 后访问 Context.Connection 应抛出异常，而非返回已释放的连接。
+    /// </summary>
+    [Fact]
+    public void ContextConnection_ShouldThrow_AfterDisposeWithoutTransaction()
+    {
+        // Arrange
+        var mockConn = new Mock<IDbConnection>();
+        mockConn.Setup(c => c.State).Returns(ConnectionState.Open);
+        var uow = new UnitOfWork(mockConn.Object, autoTransaction: false);
+
+        // Act: 不调用 Demand/Commit/Rollback，直接 Dispose
+        uow.Dispose();
+
+        // Assert: 访问 Context.Connection 应抛出异常
+        // 当前代码返回已释放的连接（无声失败）
+        var context = ((UnitOfWork)uow).Context; // 需要 InternalsVisibleTo
+        Assert.Throws<ObjectDisposedException>(() => { _ = context.Connection; });
+    }
+}
+
+/// <summary>
+/// 用于测试的假仓储，必须具有接受 IUnitOfWorkContext 的公开构造函数。
+/// </summary>
+public class FakeRepository : Repository<FakeEntity>
+{
+    public FakeRepository(IUnitOfWorkContext context) : base(context) { }
+}
+
+public class FakeEntity
+{
+    public long Id { get; set; }
+    public string? Name { get; set; }
 }
