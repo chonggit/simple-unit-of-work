@@ -117,9 +117,14 @@ namespace SimpleUnitOfWork
                             $"事务已存在，等级不匹配：当前为 {_isolationLevel}，传入为 {level}。");
                     return;
                 }
+                // 检查是否已在无事务状态下执行过操作
+                if (_context.HasUntransactedAccess)
+                    throw new InvalidOperationException(
+                        "无法开启事务：已有操作在无事务状态下执行。请确保 Demand() 在所有数据库操作之前调用。");
                 _isolationLevel = level;
                 EnsureConnectionOpen();
                 _context.Transaction = _context.Connection.BeginTransaction(level);
+                _context.HasUntransactedAccess = false; // 事务已创建，重置标记
             }
         }
 
