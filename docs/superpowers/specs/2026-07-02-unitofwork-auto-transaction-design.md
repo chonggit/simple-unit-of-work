@@ -23,7 +23,7 @@ public UnitOfWork(
 |---|---|---|
 | `connection` | (必填) | 数据库连接 |
 | `autoTransaction` | `true` | 构造时自动调用 `Demand(isolationLevel)` |
-| `isolationLevel` | `ReadCommitted` | 仅在 `autoTransaction = true` 时生效 |
+| `isolationLevel` | `ReadCommitted` | 始终存入 `_isolationLevel` 字段。`autoTransaction = true` 时自动用于 `Demand()`；`autoTransaction = false` 时被后续无参 `Demand()` 调用使用 |
 
 ### 静态工厂方法
 
@@ -36,6 +36,8 @@ public static IUnitOfWork Create(bool autoTransaction)
 public static IUnitOfWork Create(bool autoTransaction, IsolationLevel isolationLevel)
 ```
 
+**连接泄漏防护**：所有 `Create()` 重载内部需用 try-catch 包裹构造函数调用。若构造函数失败（如 `autoTransaction = true` 时 `Demand()` 抛异常），需在 catch 中释放已创建的 `IDbConnection`，再重新抛出原始异常。建议将连接创建与 UnitOfWork 构造提取为一个 private helper 方法以消除三个重载间的重复代码，具体重构方式由实施者决定。
+
 ### IUnitOfWork 接口
 
 **不变。** `Demand()` / `Commit()` / `Rollback()` / `GetRepository<T>()` 签名保持原样。运行时约束在 `UnitOfWork` 实现层完成。
@@ -44,15 +46,16 @@ public static IUnitOfWork Create(bool autoTransaction, IsolationLevel isolationL
 
 ### UnitOfWorkContext 追踪标记
 
-新增 `_hasUntransactedAccess` 字段：
+新增 `_hasUntransactedAccess` 字段（`volatile`）：
 
-- `Connection` getter 中，当 `Transaction == null` 时置为 `true`
+- `Connection` getter 中，当 `Transaction == null` 时置为 `true`（写入不在锁内）
+- `Demand()` 在 `lock(_lock)` 内读取，`volatile` 确保与锁的内存屏障配合，防止读到陈旧值
 - 通过 `internal` 属性暴露给 `UnitOfWork`
 
 ### Demand() 前置检查
 
-在 `Demand(IsolationLevel)` 开头检查 `_context.HasUntransactedAccess`：
-- 若为 `true`：抛出 `InvalidOperationException`，消息指明"无法开启事务：已有操作在无事务状态下执行"
+在 `Demand(IsolationLevel)` 开头（`lock` 内部）检查 `_context.HasUntransactedAccess`：
+- 若为 `true`：抛出 `InvalidOperationException`，消息："无法开启事务：已有操作在无事务状态下执行。请确保 Demand() 在所有数据库操作之前调用。"
 - 若为 `false`：继续原有逻辑
 
 `Demand()` 内部的 `EnsureConnectionOpen()` 会触发 `Connection` getter（置位标记），但检查已在此之前完成，不影响正确性。`BeginTransaction` 成功后显式重置 `_hasUntransactedAccess = false`，保持语义干净。
@@ -68,11 +71,39 @@ public static IUnitOfWork Create(bool autoTransaction, IsolationLevel isolationL
 
 `autoTransaction = true` 时，构造完成后立即调用 `Demand(isolationLevel)`。
 
+`isolationLevel` 参数始终存入 `_isolationLevel` 字段：
+- `autoTransaction = true` → 自动 `Demand(isolationLevel)` 使用
+- `autoTransaction = false` → 后续手动无参 `Demand()` 使用该值
+
 ### Dispose() 安全化
 
-改为仅在 `_context.Transaction != null` 时回滚，无活动事务则静默跳过。避免无事务模式下 `Dispose()` 抛出异常。
+条件判断**保留在 `Dispose(bool)` 内部**，不改变现有锁结构：
+
+```csharp
+protected virtual void Dispose(bool disposing)
+{
+    if (!_disposedValue)
+    {
+        if (disposing)
+        {
+            // 仅在有活动事务时回滚（Transaction 读取在 Dispose() 的 lock 保护下）
+            if (_context.Transaction != null)
+            {
+                try { Rollback(); }
+                catch { /* 吞掉 */ }
+            }
+            _context.Dispose();
+        }
+        _disposedValue = true;
+    }
+}
+```
+
+`Dispose()` 持有 `lock(_lock)` 调用 `Dispose(bool)` → `Rollback()` → `CompleteTransaction()` → 再次获取 `lock(_lock)`。依赖 C# `lock` 的重入特性，此行为不变，不引入新的无锁路径。
 
 ## 使用模式
+
+**调用顺序约束**：当 `autoTransaction = false` 时，若打算使用事务，`Demand()` 必须在所有数据库操作（包括 `GetRepository<T>()` 之后的 CRUD 调用）之前调用。`GetRepository<T>()` 本身不触发 `_hasUntransactedAccess`，但获取 Repository 后立即调用 CRUD 方法会触发标记，导致后续 `Demand()` 失败。
 
 ### 模式 1：自动事务（默认，与现在一致）
 
@@ -106,7 +137,7 @@ var items = repo.GetAll(); // 无事务，Dispose 时静默释放连接
 ```csharp
 using var uow = UnitOfWork.Create(autoTransaction: false);
 var repo = uow.GetRepository<MyRepository>();
-var items = repo.GetAll();     // 无事务操作
+var items = repo.GetAll();     // 无事务操作 → 置位 _hasUntransactedAccess
 uow.Demand();                  // ❌ InvalidOperationException
 ```
 
