@@ -102,7 +102,15 @@ namespace SimpleUnitOfWork
             _context = new UnitOfWorkContext(connection, () => _completed);
             if (autoTransaction)
             {
-                Demand(isolationLevel);
+                try
+                {
+                    Demand(isolationLevel);
+                }
+                catch
+                {
+                    _context.Dispose();
+                    throw;
+                }
             }
         }
 

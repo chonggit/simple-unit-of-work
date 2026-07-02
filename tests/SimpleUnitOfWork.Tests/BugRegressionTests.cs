@@ -42,4 +42,26 @@ public class BugRegressionTests
         var ex = Record.Exception(() => uow.Demand(IsolationLevel.ReadCommitted));
         Assert.Null(ex); // 不应该抛异常，应能重试
     }
+
+    /// <summary>
+    /// Bug #2: 构造函数内 Demand() 失败后，_context 未被释放，导致连接泄漏。
+    /// 直接调用构造函数（不走 CreateCore）时，若 Demand 失败，连接无人释放。
+    /// 修复后：构造函数应在失败时清理 _context。
+    /// </summary>
+    [Fact]
+    public void Constructor_ShouldDisposeConnection_WhenAutoTransactionFails()
+    {
+        // Arrange
+        var mockConn = new Mock<IDbConnection>();
+        mockConn.Setup(c => c.State).Returns(ConnectionState.Open);
+        mockConn.Setup(c => c.BeginTransaction(It.IsAny<IsolationLevel>()))
+            .Throws(new Exception("Simulated DB failure"));
+
+        // Act: 直接构造，不经过 CreateCore
+        try { _ = new UnitOfWork(mockConn.Object, autoTransaction: true); }
+        catch (Exception) { /* 预期抛出 */ }
+
+        // Assert: 构造函数应清理已创建的 _context（其 Dispose 会释放连接）
+        mockConn.Verify(c => c.Dispose(), Times.AtLeastOnce);
+    }
 }
