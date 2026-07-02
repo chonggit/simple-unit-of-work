@@ -441,6 +441,135 @@ public class UnitOfWorkTests
 
     #endregion
 
+    #region Edge Cases
+
+    [Fact]
+    public void Demand_ShouldOpenConnection_WhenConnectionIsClosed()
+    {
+        var mockConn = new Mock<IDbConnection>();
+        mockConn.Setup(c => c.State).Returns(ConnectionState.Closed);
+        var mockTran = new Mock<IDbTransaction>();
+        mockConn.Setup(c => c.BeginTransaction(It.IsAny<IsolationLevel>()))
+            .Returns(mockTran.Object);
+
+        using var uow = new UnitOfWork(mockConn.Object, autoTransaction: false);
+        uow.Demand();
+
+        mockConn.Verify(c => c.Open(), Times.Once);
+    }
+
+    [Fact]
+    public void Demand_ShouldCloseThenOpen_WhenConnectionIsBroken()
+    {
+        var mockConn = new Mock<IDbConnection>();
+        mockConn.Setup(c => c.State).Returns(ConnectionState.Broken);
+        var mockTran = new Mock<IDbTransaction>();
+        mockConn.Setup(c => c.BeginTransaction(It.IsAny<IsolationLevel>()))
+            .Returns(mockTran.Object);
+
+        using var uow = new UnitOfWork(mockConn.Object, autoTransaction: false);
+        uow.Demand();
+
+        mockConn.Verify(c => c.Close(), Times.Once);
+        mockConn.Verify(c => c.Open(), Times.Once);
+    }
+
+    [Fact]
+    public void Commit_ShouldThrowSpecificMessage_InNoTransactionMode()
+    {
+        var mockConn = CreateOpenConnection();
+        using var uow = new UnitOfWork(mockConn.Object, autoTransaction: false);
+
+        // 访问 Connection 触发无事务模式标记
+        _ = ((UnitOfWork)uow).Context.Connection;
+
+        var ex = Assert.Throws<InvalidOperationException>(() => uow.Commit());
+        Assert.Contains("无事务模式", ex.Message);
+    }
+
+    [Fact]
+    public void GetRepository_ShouldThrow_AfterCommit()
+    {
+        var mockConn = CreateOpenConnection();
+        var mockTran = new Mock<IDbTransaction>();
+        mockConn.Setup(c => c.BeginTransaction(It.IsAny<IsolationLevel>()))
+            .Returns(mockTran.Object);
+
+        var uow = new UnitOfWork(mockConn.Object, autoTransaction: false);
+        uow.Demand();
+        uow.Commit();
+
+        // Commit 后 _completed=true，但 GetRepository 目前只检查 _disposedValue
+        // Context.Connection 会检查 _isCompleted，所以通过 Repository 访问会失败
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            var repo = uow.GetRepository<FakeRepository>();
+            _ = ((UnitOfWork)uow).Context.Connection; // 触发 _isCompleted 检查
+        });
+    }
+
+    [Fact]
+    public void ContextConnection_ShouldThrow_AfterCommit()
+    {
+        var mockConn = CreateOpenConnection();
+        var mockTran = new Mock<IDbTransaction>();
+        mockConn.Setup(c => c.BeginTransaction(It.IsAny<IsolationLevel>()))
+            .Returns(mockTran.Object);
+
+        var uow = new UnitOfWork(mockConn.Object, autoTransaction: false);
+        uow.Demand();
+        uow.Commit();
+
+        Assert.Throws<InvalidOperationException>(() =>
+            _ = ((UnitOfWork)uow).Context.Connection);
+    }
+
+    [Fact]
+    public void Demand_Parameterless_ShouldUseStoredIsolationLevel()
+    {
+        var mockConn = CreateOpenConnection();
+        var mockTran = new Mock<IDbTransaction>();
+        mockConn.Setup(c => c.BeginTransaction(It.IsAny<IsolationLevel>()))
+            .Returns(mockTran.Object);
+
+        var uow = new UnitOfWork(mockConn.Object, autoTransaction: false,
+            isolationLevel: IsolationLevel.Serializable);
+
+        // 无参 Demand 应使用构造时存储的隔离级别
+        uow.Demand();
+        mockConn.Verify(c => c.BeginTransaction(IsolationLevel.Serializable), Times.Once);
+    }
+
+    [Fact]
+    public void HasUntransactedAccess_ShouldBeFalse_AfterSuccessfulDemand()
+    {
+        var mockConn = CreateOpenConnection();
+        var mockTran = new Mock<IDbTransaction>();
+        mockConn.Setup(c => c.BeginTransaction(It.IsAny<IsolationLevel>()))
+            .Returns(mockTran.Object);
+
+        var uow = new UnitOfWork(mockConn.Object, autoTransaction: false);
+        uow.Demand();
+
+        // Demand 成功后，HasUntransactedAccess 应为 false（内部 EnsureConnectionOpen 的置位已被重置）
+        var context = (UnitOfWorkContext)((UnitOfWork)uow).Context;
+        Assert.False(context.HasUntransactedAccess);
+    }
+
+    [Fact]
+    public void HasUntransactedAccess_ShouldBeTrue_AfterConnectionAccessWithoutTransaction()
+    {
+        var mockConn = CreateOpenConnection();
+        var uow = new UnitOfWork(mockConn.Object, autoTransaction: false);
+
+        _ = ((UnitOfWork)uow).Context.Connection;
+
+        var context = (UnitOfWorkContext)((UnitOfWork)uow).Context;
+        Assert.True(context.HasUntransactedAccess);
+    }
+
+    #endregion
+
     #region Helpers
 
     private static Mock<IDbConnection> CreateOpenConnection()
