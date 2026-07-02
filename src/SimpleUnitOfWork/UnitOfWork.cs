@@ -156,8 +156,16 @@ namespace SimpleUnitOfWork
                         "无法开启事务：已有操作在无事务状态下执行。请确保 Demand() 在所有数据库操作之前调用。");
                 _isolationLevel = level;
                 EnsureConnectionOpen();
-                _context.Transaction = _context.Connection.BeginTransaction(level);
-                _context.HasUntransactedAccess = false; // 事务已创建，重置标记
+                try
+                {
+                    _context.Transaction = _context.Connection.BeginTransaction(level);
+                }
+                finally
+                {
+                    // 无论 BeginTransaction 成功或失败，重置标记。
+                    // EnsureConnectionOpen 会置位标记，但这是 Demand 内部操作，不算"无事务访问"。
+                    _context.HasUntransactedAccess = false;
+                }
             }
         }
 
