@@ -215,18 +215,19 @@ namespace SimpleUnitOfWork
             {
                 if (disposing)
                 {
-                    try
+                    // 仅在有活动事务时回滚（Transaction 读取在 Dispose() 的 lock 保护下）
+                    if (_context.Transaction != null)
                     {
-                        Rollback(); // CompleteTransaction 已处理异常
+                        try
+                        {
+                            Rollback(); // CompleteTransaction 已处理异常
+                        }
+                        catch
+                        {
+                            // 所有异常在此吞掉 — Dispose 绝不能抛异常
+                        }
                     }
-                    catch
-                    {
-                        // 所有异常在此吞掉 — Dispose 绝不能抛异常
-                    }
-                    finally
-                    {
-                        _context.Dispose(); // 会释放 Transaction（如未释放）和 Connection
-                    }
+                    _context.Dispose(); // 会释放 Transaction（如未释放）和 Connection
                 }
                 _disposedValue = true;
             }
