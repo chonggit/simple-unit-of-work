@@ -29,7 +29,7 @@ namespace SimpleUnitOfWork
         /// <summary>
         /// 当前事务，来自注入的工作单元上下文。
         /// </summary>
-        protected virtual IDbTransaction Transaction => _context.Transaction;
+        protected virtual IDbTransaction? Transaction => _context.Transaction;
 
         /// <summary>
         /// 命令超时时间（秒），来自注入的工作单元上下文。
