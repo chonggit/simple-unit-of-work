@@ -147,7 +147,13 @@ namespace SimpleUnitOfWork
 
             var transaction = _context.Transaction;
             if (transaction == null)
-                throw new InvalidOperationException("There is no active transaction to complete. Call Demand() first.");
+            {
+                if (_context.HasUntransactedAccess)
+                    throw new InvalidOperationException(
+                        "当前工作单元运行在无事务模式下，无需调用 Commit/Rollback。");
+                throw new InvalidOperationException(
+                    "There is no active transaction to complete. Call Demand() first.");
+            }
 
             try
             {
