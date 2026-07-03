@@ -66,7 +66,7 @@ namespace SimpleUnitOfWork
         /// <param name="connection">数据库连接，不能为 null</param>
         /// <param name="isCompleted">完成状态回调函数，指向 UnitOfWork._completed</param>
         /// <exception cref="ArgumentNullException"></exception>
-        internal UnitOfWorkContext(IDbConnection connection, Func<bool> isCompleted)
+        internal UnitOfWorkContext(IDbConnection connection, Func<bool> isCompleted,int commandTimeout)
         {
             if (connection == null)
                 throw new ArgumentNullException(nameof(connection), "Connection cannot be null.");
@@ -74,6 +74,7 @@ namespace SimpleUnitOfWork
                 throw new ArgumentNullException(nameof(isCompleted));
             _connection = connection;
             _isCompleted = isCompleted;
+            CommandTimeout = commandTimeout;
         }
 
         /// <summary>

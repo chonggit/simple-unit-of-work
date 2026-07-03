@@ -17,6 +17,11 @@ namespace SimpleUnitOfWork
 
         private static volatile Func<IDbConnection>? _connectionFactory;
 
+        /// <summary>
+        /// 命令超时时间（秒），默认 30 秒。可通过 SetConnectionFactory 设置。
+        /// </summary>
+        private static volatile int _commandTimeout = 30;
+
         private IsolationLevel _isolationLevel = IsolationLevel.ReadCommitted;
 
         private readonly object _lock = new();
@@ -30,11 +35,13 @@ namespace SimpleUnitOfWork
         /// 设置用于创建数据库连接的工厂方法。此方法应在创建任何工作单元实例之前调用。
         /// </summary>
         /// <param name="connectionFactory">数据库连接工厂方法</param>
-        public static void SetConnectionFactory(Func<IDbConnection> connectionFactory)
+        /// <param name="commandTimeout">命令超时时间（秒）</param>
+        public static void SetConnectionFactory(Func<IDbConnection> connectionFactory, int commandTimeout = 30)
         {
             if (connectionFactory == null)
                 throw new ArgumentNullException(nameof(connectionFactory), "Connection factory cannot be null.");
             _connectionFactory = connectionFactory;
+            _commandTimeout = commandTimeout;
         }
 
         /// <summary>
@@ -99,7 +106,7 @@ namespace SimpleUnitOfWork
             if (connection == null)
                 throw new ArgumentNullException(nameof(connection), "Connection cannot be null.");
             _isolationLevel = isolationLevel;
-            _context = new UnitOfWorkContext(connection, () => _completed);
+            _context = new UnitOfWorkContext(connection, () => _completed,_commandTimeout);
             if (autoTransaction)
             {
                 try
